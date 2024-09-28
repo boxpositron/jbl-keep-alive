@@ -1,18 +1,20 @@
+import logging
+import asyncio
+
+import pyaudio
+import numpy as np
+
+from app.devices import fetch_device_config
+
 from app.models import (
     FrequencyConfiguration,
     Device,
     JBLDevice
 )
+
 from app.config import JBL_DEVICE_TARGET
-from app.devices import fetch_device_config
-import time
-import numpy as np
-import logging
 
-import pyaudio
-import sounddevice as sd
-
-from typing import List, Dict
+from typing import List, Dict, TypedDict, Callable
 
 logging.basicConfig(
     level=logging.INFO,
@@ -28,16 +30,16 @@ DeviceMap: Dict[str, JBLDevice] = {
 }
 
 
-def generate_sine_wave(
-        frequency: int,
-        duration: float,
-        sample_rate: int,
-        amplitude: float
-) -> np.ndarray:
+def generate_sine_wave(config: FrequencyConfiguration) -> np.ndarray:
     """
     Generate a sine wave with the given frequency and duration.
 
     """
+    sample_rate = config.sample_rate
+    frequency = config.frequency
+    duration = config.duration
+    amplitude = config.amplitude
+
     t = np.linspace(0, duration, int(sample_rate * duration), endpoint=False)
     wave = amplitude * np.sin(2 * np.pi * frequency * t)
     return wave
@@ -45,14 +47,15 @@ def generate_sine_wave(
 
 def play_sound(
     wave: np.ndarray,
-    sample_rate: int
+    device: Device
 ):
 
     p = pyaudio.PyAudio()
     # Open stream to play the sound
     stream = p.open(format=pyaudio.paFloat32,
                     channels=1,
-                    rate=sample_rate,
+                    rate=device.defaultSampleRate,
+                    output_device_index=device.index,
                     output=True)
 
     # Convert the wave data to 32-bit float and play it
@@ -72,94 +75,90 @@ def list_audio_devices() -> List[Device]:
     for i in range(p.get_device_count()):
         device_info = p.get_device_info_by_index(i)
 
-        device = Device(
-            index=device_info["index"],
-            structVersion=device_info["structVersion"],
-            name=device_info["name"],
-            maxInputChannels=device_info["maxInputChannels"],
-            maxOutputChannels=device_info["maxOutputChannels"],
-            defaultLowInputLatency=device_info["defaultLowInputLatency"],
-            defaultLowOutputLatency=device_info["defaultLowOutputLatency"],
-            defaultHighInputLatency=device_info["defaultHighInputLatency"],
-            defaultHighOutputLatency=device_info["defaultHighOutputLatency"],
-            defaultSampleRate=device_info["defaultSampleRate"]
-        )
+        try:
+            device = Device(**device_info)  # type: ignore
+        except Exception as err:
+            logger.error(
+                f"Error parsing device info: {device_info}", exc_info=err)
+            continue
 
         # Check if the device name is a string
-        if type(device.name) is str:
-            device.name = device.name.strip()
+        device.name = device.name.strip()
 
         # Filter out non-output devices
 
-        if type(device.maxOutputChannels) is int:
-            if device.maxOutputChannels > 0:
-                devices.append(device)
+        if device.maxOutputChannels > 0:
+            devices.append(device)
 
     p.terminate()
 
     return devices
 
 
-def get_default_output_device() -> Device:
-    # Get the default output device
-    # Index 1 refers to the output device (0 for input)
-    default_output_index = sd.default.device[1]
-    device_info = sd.query_devices(default_output_index)
+class KeepAliveJob(TypedDict):
+    device_name: str
+    callback: Callable[[], None]
+    interval: int
 
-    audio_devices = list_audio_devices()
 
-    selected_device = next(
-        (device for device in audio_devices if device.index ==
-         device_info["index"]),
-        None)
+async def run_job(job: KeepAliveJob):
+    device_name = job["device_name"]
+    callback = job["callback"]
+    interval = job["interval"]
 
-    if not selected_device:
-        raise ValueError("No default output device")
+    logger.info(f"Starting keep alive job for {device_name}")
 
-    return selected_device
+    while True:
+
+        callback()
+        await asyncio.sleep(interval)
 
 
 def keep_alive():
 
-    while True:
-        active_device = get_default_output_device()
+    logger.info("Starting keep alive process")
 
-        active_device_name = ""
+    system_devices = list_audio_devices()
 
-        if type(active_device.name) is str:
-            active_device_name = active_device.name.strip()
+    jobs: List[KeepAliveJob] = []
 
-        if not len(active_device_name):
-            logger.error("No active audio device found")
-            return
+    for system_device in system_devices:
 
-        device_model = DeviceMap.get(active_device_name, None)
+        device_name = system_device.name
+
+        device_model = DeviceMap.get(device_name, None)
+
+        logger.info(f"Found device: {device_name}")
 
         if not device_model:
-            logger.error(f"Device model not found for {active_device_name}")
-            return
+            continue
 
         device = fetch_device_config(device_model)
 
-        frequency_configuration = FrequencyConfiguration(
-            frequency=device.frequency_configuration.frequency,
-            duration=device.frequency_configuration.duration,
-            amplitude=device.frequency_configuration.amplitude,
-            sample_rate=active_device.defaultSampleRate,
+        wave = generate_sine_wave(device.frequency_configuration)
+
+        play_sound(
+            wave=wave,
+            device=system_device
         )
 
-        wave = generate_sine_wave(
-            frequency=frequency_configuration.frequency,
-            duration=frequency_configuration.duration,
-            sample_rate=frequency_configuration.sample_rate,
-            amplitude=frequency_configuration.amplitude
+        jobs.append(
+            {
+                "device_name": device_name,
+                "callback": lambda: play_sound(
+                    wave=wave,
+                    device=system_device
+                ),
+                "interval": int(device.interval)
+            }
         )
 
-        logger.info(f"Playing sound at {frequency_configuration.frequency} Hz")
-        play_sound(wave=wave, sample_rate=frequency_configuration.sample_rate)
+    loop = asyncio.get_event_loop()
 
-        logger.info(f"Sleeping for {device.interval} seconds")
-        time.sleep(device.interval)
+    for job in jobs:
+        loop.create_task(run_job(job))
+
+    loop.run_forever()
 
 
 def main() -> None:
