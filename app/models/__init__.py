@@ -1,6 +1,5 @@
 from enum import Enum
 from pydantic import BaseModel
-from typing import Union
 from typing_extensions import Annotated
 
 DEFAULT_SAMPLE_RATE: int = 44100
@@ -27,17 +26,14 @@ class DeviceConfiguration(BaseModel):
     ]
 
 
-DeviceValue = Union[str, int, float]
-
-
 class Device(BaseModel):
-    index: DeviceValue
-    structVersion: DeviceValue
-    name: DeviceValue
-    maxInputChannels: DeviceValue
-    maxOutputChannels: DeviceValue
-    defaultLowInputLatency: DeviceValue
-    defaultLowOutputLatency: DeviceValue
-    defaultHighInputLatency: DeviceValue
-    defaultHighOutputLatency: DeviceValue
-    defaultSampleRate: DeviceValue
+    index: int
+    structVersion: int
+    name: str
+    maxInputChannels: int
+    maxOutputChannels: int
+    defaultLowInputLatency: float
+    defaultLowOutputLatency: float
+    defaultHighInputLatency: float
+    defaultHighOutputLatency: float
+    defaultSampleRate: int
